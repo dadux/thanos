@@ -65,7 +65,7 @@ func main() {
 	registerQuery(cmds, app, "query")
 	registerRule(cmds, app, "rule")
 	registerCompact(cmds, app, "compact")
-	registerExample(cmds, app, "example")
+	registerBucket(cmds, app, "bucket")
 
 	cmd, err := app.Parse(os.Args[1:])
 	if err != nil {
