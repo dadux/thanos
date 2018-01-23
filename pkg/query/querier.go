@@ -36,31 +36,31 @@ func NewQueryableBuilder(logger log.Logger, proxy storepb.StoreServer, replicaLa
 	}
 }
 
-func (b *QueryableBuilder) New() *reqQueryable {
-	return &reqQueryable{
+func (b *QueryableBuilder) New() *queryable {
+	return &queryable{
 		base: b,
 	}
 }
 
-type reqQueryable struct {
+type queryable struct {
 	base *QueryableBuilder
 
 	deduplicate      bool
 	partialErrReport PartialErrReporter
 }
 
-func (q *reqQueryable) WithPartialErrReporter(r PartialErrReporter) *reqQueryable {
+func (q *queryable) WithPartialErrReporter(r PartialErrReporter) *queryable {
 	q.partialErrReport = r
 	return q
 }
 
-func (q *reqQueryable) WithDeduplication() *reqQueryable {
+func (q *queryable) WithDeduplication() *queryable {
 	q.deduplicate = true
 	return q
 }
 
 // Querier returns a new storage querier against the underlying proxy store API.
-func (q *reqQueryable) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
+func (q *queryable) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
 	return newQuerier(ctx, q.base.logger, mint, maxt, q.base.replicaLabel, q.base.proxy, q.deduplicate, q.partialErrReport), nil
 }
 
