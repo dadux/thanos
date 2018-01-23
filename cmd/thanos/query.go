@@ -122,17 +122,16 @@ func runQuery(
 	selectorLset labels.Labels,
 	storeAddrs []string,
 ) error {
-	pqlOpts := &promql.EngineOptions{
-		Logger:               logger,
-		Metrics:              reg,
-		Timeout:              queryTimeout,
-		MaxConcurrentQueries: maxConcurrentQueries,
-	}
 	var (
-		stores    = newStoreSet(logger, reg, tracer, peer, storeAddrs)
-		proxy     = store.NewProxyStore(logger, stores.Get, selectorLset)
-		queryable = query.NewQueryable(logger, proxy, replicaLabel)
-		engine    = promql.NewEngine(queryable, pqlOpts)
+		stores           = newStoreSet(logger, reg, tracer, peer, storeAddrs)
+		proxy            = store.NewProxyStore(logger, stores.Get, selectorLset)
+		queryableBuilder = query.NewQueryableBuilder(logger, proxy, replicaLabel)
+		engine           = promql.NewEngine(
+			logger,
+			reg,
+			maxConcurrentQueries,
+			queryTimeout,
+		)
 	)
 	// Periodically update the store set with the addresses we see in our cluster.
 	{
@@ -164,7 +163,7 @@ func runQuery(
 		router := route.New()
 		ui.New(logger, nil).Register(router)
 
-		api := v1.NewAPI(reg, engine, queryable)
+		api := v1.NewAPI(reg, engine, queryableBuilder)
 		api.Register(router.WithPrefix("/api/v1"), tracer, logger)
 
 		mux := http.NewServeMux()

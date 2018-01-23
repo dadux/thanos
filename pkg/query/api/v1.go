@@ -96,8 +96,8 @@ type apiFunc func(r *http.Request) (interface{}, []error, *apiError)
 // API can register a set of endpoints in a router and handle
 // them using the provided storage and query engine.
 type API struct {
-	queryable   storage.Queryable
-	queryEngine *promql.Engine
+	queryableBuilder *query.QueryableBuilder
+	queryEngine      *promql.Engine
 
 	instantQueryDuration prometheus.Histogram
 	rangeQueryDuration   prometheus.Histogram
@@ -109,7 +109,7 @@ type API struct {
 func NewAPI(
 	reg *prometheus.Registry,
 	qe *promql.Engine,
-	q storage.Queryable,
+	b *query.QueryableBuilder,
 ) *API {
 	instantQueryDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "thanos_query_api_instant_query_duration_seconds",
@@ -132,7 +132,7 @@ func NewAPI(
 	)
 	return &API{
 		queryEngine:          qe,
-		queryable:            q,
+		queryableBuilder:     b,
 		instantQueryDuration: instantQueryDuration,
 		rangeQueryDuration:   rangeQueryDuration,
 		now:                  time.Now,
@@ -199,7 +199,16 @@ func (api *API) query(r *http.Request) (interface{}, []error, *apiError) {
 		defer cancel()
 	}
 
-	var opts []query.Option
+	var (
+		warnmtx  sync.Mutex
+		warnings []error
+	)
+	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+		warnmtx.Lock()
+		warnings = append(warnings, err)
+		warnmtx.Unlock()
+	})
+
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
 		enableDeduplication, err := strconv.ParseBool(dedup)
@@ -207,31 +216,21 @@ func (api *API) query(r *http.Request) (interface{}, []error, *apiError) {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
 		}
 		if enableDeduplication {
-			opts = append(opts, query.WithDeduplication())
+			queryable = queryable.WithDeduplication()
 		}
 	}
-	var (
-		warnmtx  sync.Mutex
-		warnings []error
-	)
-	opts = append(opts, query.WithPartialErrReporter(func(err error) {
-		warnmtx.Lock()
-		warnings = append(warnings, err)
-		warnmtx.Unlock()
-	}))
 
 	// We are starting promQL tracing span here, because we have no control over promQL code.
 	span, ctx := tracing.StartSpan(r.Context(), "promql_instant_query")
 	defer span.Finish()
 
 	begin := api.now()
-	qry, err := api.queryEngine.NewInstantQuery(api.queryable, r.FormValue("query"), ts)
+	qry, err := api.queryEngine.NewInstantQuery(queryable, r.FormValue("query"), ts)
 	if err != nil {
 		return nil, nil, &apiError{errorBadData, err}
 	}
 
-	// TODO(Bplotka): Add proper query.PartialErrorReporter to opts when UI is ready.
-	res := qry.Exec(query.ContextWithOpts(ctx, opts...))
+	res := qry.Exec(ctx)
 	if res.Err != nil {
 		switch res.Err.(type) {
 		case promql.ErrQueryCanceled:
@@ -293,7 +292,16 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *apiError) {
 		defer cancel()
 	}
 
-	var opts []query.Option
+	var (
+		warnmtx  sync.Mutex
+		warnings []error
+	)
+	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+		warnmtx.Lock()
+		warnings = append(warnings, err)
+		warnmtx.Unlock()
+	})
+
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
 		enableDeduplication, err := strconv.ParseBool(dedup)
@@ -301,31 +309,21 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *apiError) {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
 		}
 		if enableDeduplication {
-			opts = append(opts, query.WithDeduplication())
+			queryable = queryable.WithDeduplication()
 		}
 	}
-	var (
-		warnmtx  sync.Mutex
-		warnings []error
-	)
-	opts = append(opts, query.WithPartialErrReporter(func(err error) {
-		warnmtx.Lock()
-		warnings = append(warnings, err)
-		warnmtx.Unlock()
-	}))
 
 	// We are starting promQL tracing span here, because we have no control over promQL code.
 	span, ctx := tracing.StartSpan(r.Context(), "promql_range_query")
 	defer span.Finish()
 
 	begin := api.now()
-	qry, err := api.queryEngine.NewRangeQuery(api.queryable, r.FormValue("query"), start, end, step)
+	qry, err := api.queryEngine.NewRangeQuery(queryable, r.FormValue("query"), start, end, step)
 	if err != nil {
 		return nil, nil, &apiError{errorBadData, err}
 	}
 
-	// TODO(Bplotka): Add proper query.PartialErrorReporter to opts when UI is ready.
-	res := qry.Exec(query.ContextWithOpts(ctx, opts...))
+	res := qry.Exec(ctx)
 	if res.Err != nil {
 		switch res.Err.(type) {
 		case promql.ErrQueryCanceled:
@@ -354,13 +352,14 @@ func (api *API) labelValues(r *http.Request) (interface{}, []error, *apiError) {
 		warnmtx  sync.Mutex
 		warnings []error
 	)
-	ctx = query.ContextWithOpts(ctx, query.WithPartialErrReporter(func(err error) {
+
+	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
 		warnmtx.Lock()
 		warnings = append(warnings, err)
 		warnmtx.Unlock()
-	}))
+	})
 
-	q, err := api.queryable.Querier(ctx, math.MinInt64, math.MaxInt64)
+	q, err := queryable.Querier(ctx, math.MinInt64, math.MaxInt64)
 	if err != nil {
 		return nil, nil, &apiError{errorExec, err}
 	}
@@ -418,7 +417,16 @@ func (api *API) series(r *http.Request) (interface{}, []error, *apiError) {
 		matcherSets = append(matcherSets, matchers)
 	}
 
-	var opts []query.Option
+	var (
+		warnmtx  sync.Mutex
+		warnings []error
+	)
+	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+		warnmtx.Lock()
+		warnings = append(warnings, err)
+		warnmtx.Unlock()
+	})
+
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
 		enableDeduplication, err := strconv.ParseBool(r.FormValue("dedup"))
@@ -426,22 +434,11 @@ func (api *API) series(r *http.Request) (interface{}, []error, *apiError) {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
 		}
 		if enableDeduplication {
-			opts = append(opts, query.WithDeduplication())
+			queryable = queryable.WithDeduplication()
 		}
 	}
-	var (
-		warnmtx  sync.Mutex
-		warnings []error
-	)
-	opts = append(opts, query.WithPartialErrReporter(func(err error) {
-		warnmtx.Lock()
-		warnings = append(warnings, err)
-		warnmtx.Unlock()
-	}))
-	ctx := query.ContextWithOpts(r.Context(), opts...)
 
-	// TODO(Bplotka): Add proper query.PartialErrorReporter to opts when UI is ready.
-	q, err := api.queryable.Querier(ctx, timestamp.FromTime(start), timestamp.FromTime(end))
+	q, err := queryable.Querier(r.Context(), timestamp.FromTime(start), timestamp.FromTime(end))
 	if err != nil {
 		return nil, nil, &apiError{errorExec, err}
 	}
