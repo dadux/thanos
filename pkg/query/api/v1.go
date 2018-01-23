@@ -96,8 +96,8 @@ type apiFunc func(r *http.Request) (interface{}, []error, *apiError)
 // API can register a set of endpoints in a router and handle
 // them using the provided storage and query engine.
 type API struct {
-	queryableBuilder *query.QueryableBuilder
-	queryEngine      *promql.Engine
+	queryableCreate query.QueryableCreator
+	queryEngine     *promql.Engine
 
 	instantQueryDuration prometheus.Histogram
 	rangeQueryDuration   prometheus.Histogram
@@ -109,7 +109,7 @@ type API struct {
 func NewAPI(
 	reg *prometheus.Registry,
 	qe *promql.Engine,
-	b *query.QueryableBuilder,
+	c query.QueryableCreator,
 ) *API {
 	instantQueryDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "thanos_query_api_instant_query_duration_seconds",
@@ -132,7 +132,7 @@ func NewAPI(
 	)
 	return &API{
 		queryEngine:          qe,
-		queryableBuilder:     b,
+		queryableCreate:      c,
 		instantQueryDuration: instantQueryDuration,
 		rangeQueryDuration:   rangeQueryDuration,
 		now:                  time.Now,
@@ -200,23 +200,22 @@ func (api *API) query(r *http.Request) (interface{}, []error, *apiError) {
 	}
 
 	var (
-		warnmtx  sync.Mutex
-		warnings []error
+		warnmtx             sync.Mutex
+		warnings            []error
+		enableDeduplication bool
 	)
-	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+	partialErrReporter := func(err error) {
 		warnmtx.Lock()
 		warnings = append(warnings, err)
 		warnmtx.Unlock()
-	})
+	}
 
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
-		enableDeduplication, err := strconv.ParseBool(dedup)
+		var err error
+		enableDeduplication, err = strconv.ParseBool(dedup)
 		if err != nil {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
-		}
-		if enableDeduplication {
-			queryable = queryable.WithDeduplication()
 		}
 	}
 
@@ -225,7 +224,7 @@ func (api *API) query(r *http.Request) (interface{}, []error, *apiError) {
 	defer span.Finish()
 
 	begin := api.now()
-	qry, err := api.queryEngine.NewInstantQuery(queryable, r.FormValue("query"), ts)
+	qry, err := api.queryEngine.NewInstantQuery(api.queryableCreate(enableDeduplication, partialErrReporter), r.FormValue("query"), ts)
 	if err != nil {
 		return nil, nil, &apiError{errorBadData, err}
 	}
@@ -293,23 +292,22 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *apiError) {
 	}
 
 	var (
-		warnmtx  sync.Mutex
-		warnings []error
+		warnmtx             sync.Mutex
+		warnings            []error
+		enableDeduplication bool
 	)
-	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+	partialErrReporter := func(err error) {
 		warnmtx.Lock()
 		warnings = append(warnings, err)
 		warnmtx.Unlock()
-	})
+	}
 
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
-		enableDeduplication, err := strconv.ParseBool(dedup)
+		var err error
+		enableDeduplication, err = strconv.ParseBool(dedup)
 		if err != nil {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
-		}
-		if enableDeduplication {
-			queryable = queryable.WithDeduplication()
 		}
 	}
 
@@ -318,7 +316,7 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *apiError) {
 	defer span.Finish()
 
 	begin := api.now()
-	qry, err := api.queryEngine.NewRangeQuery(queryable, r.FormValue("query"), start, end, step)
+	qry, err := api.queryEngine.NewRangeQuery(api.queryableCreate(enableDeduplication, partialErrReporter), r.FormValue("query"), start, end, step)
 	if err != nil {
 		return nil, nil, &apiError{errorBadData, err}
 	}
@@ -348,18 +346,18 @@ func (api *API) labelValues(r *http.Request) (interface{}, []error, *apiError) {
 	if !model.LabelNameRE.MatchString(name) {
 		return nil, nil, &apiError{errorBadData, fmt.Errorf("invalid label name: %q", name)}
 	}
-	var (
-		warnmtx  sync.Mutex
-		warnings []error
-	)
 
-	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+	var (
+		warnmtx             sync.Mutex
+		warnings            []error
+	)
+	partialErrReporter := func(err error) {
 		warnmtx.Lock()
 		warnings = append(warnings, err)
 		warnmtx.Unlock()
-	})
+	}
 
-	q, err := queryable.Querier(ctx, math.MinInt64, math.MaxInt64)
+	q, err := api.queryableCreate(true, partialErrReporter).Querier(ctx, math.MinInt64, math.MaxInt64)
 	if err != nil {
 		return nil, nil, &apiError{errorExec, err}
 	}
@@ -418,27 +416,26 @@ func (api *API) series(r *http.Request) (interface{}, []error, *apiError) {
 	}
 
 	var (
-		warnmtx  sync.Mutex
-		warnings []error
+		warnmtx             sync.Mutex
+		warnings            []error
+		enableDeduplication bool
 	)
-	queryable := api.queryableBuilder.New().WithPartialErrReporter(func(err error) {
+	partialErrReporter := func(err error) {
 		warnmtx.Lock()
 		warnings = append(warnings, err)
 		warnmtx.Unlock()
-	})
+	}
 
 	// Allow disabling deduplication on demand.
 	if dedup := r.FormValue("dedup"); dedup != "" {
-		enableDeduplication, err := strconv.ParseBool(r.FormValue("dedup"))
+		var err error
+		enableDeduplication, err = strconv.ParseBool(dedup)
 		if err != nil {
 			return nil, nil, &apiError{errorBadData, errors.Wrap(err, "'dedup' parameter")}
 		}
-		if enableDeduplication {
-			queryable = queryable.WithDeduplication()
-		}
 	}
 
-	q, err := queryable.Querier(r.Context(), timestamp.FromTime(start), timestamp.FromTime(end))
+	q, err := api.queryableCreate(enableDeduplication, partialErrReporter).Querier(r.Context(), timestamp.FromTime(start), timestamp.FromTime(end))
 	if err != nil {
 		return nil, nil, &apiError{errorExec, err}
 	}

@@ -28,10 +28,10 @@ func TestQuerier_Series(t *testing.T) {
 
 	// Querier clamps the range to [1,300], which should drop some samples of the result above.
 	// The store API allows endpoints to send more data then initially requested.
-	q := newQuerier(context.Background(), nil, 1, 300, "", testProxy)
+	q := newQuerier(context.Background(), nil, 1, 300, "", testProxy, false, nil)
 	defer q.Close()
 
-	res, err := q.Select()
+	res, err := q.Select(nil)
 	testutil.Ok(t, err)
 
 	expected := []struct {

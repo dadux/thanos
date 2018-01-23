@@ -19,49 +19,34 @@ import (
 // NOTE: It is required to be thread-safe.
 type PartialErrReporter func(error)
 
-// QueryableBuilder allows to open a querier against proxy store API.
-type QueryableBuilder struct {
-	logger       log.Logger
-	replicaLabel string
-	proxy        storepb.StoreServer
-}
+// QueryableCreator returns implementation of promql.Queryable that fetches data from the proxy store API endpoints.
+// If deduplication is enabled, all data retrieved from it will be deduplicated along the replicaLabel by default.
+type QueryableCreator func(deduplicate bool, p PartialErrReporter) storage.Queryable
 
-// NewQueryableBuilder creates implementation of promql.Queryable that fetches data from the proxy store API endpoints.
-// All data retrieved from it will be deduplicated along the replicaLabel by default.
-func NewQueryableBuilder(logger log.Logger, proxy storepb.StoreServer, replicaLabel string) *QueryableBuilder {
-	return &QueryableBuilder{
-		logger:       logger,
-		replicaLabel: replicaLabel,
-		proxy:        proxy,
-	}
-}
-
-func (b *QueryableBuilder) New() *queryable {
-	return &queryable{
-		base: b,
+// NewQueryableCreator creates QueryableCreator.
+func NewQueryableCreator(logger log.Logger, proxy storepb.StoreServer, replicaLabel string) QueryableCreator {
+	return func(deduplicate bool, p PartialErrReporter) storage.Queryable {
+		return &queryable{
+			logger:           logger,
+			replicaLabel:     replicaLabel,
+			proxy:            proxy,
+			deduplicate:      deduplicate,
+			partialErrReport: p,
+		}
 	}
 }
 
 type queryable struct {
-	base *QueryableBuilder
-
+	logger           log.Logger
+	replicaLabel     string
+	proxy            storepb.StoreServer
 	deduplicate      bool
 	partialErrReport PartialErrReporter
 }
 
-func (q *queryable) WithPartialErrReporter(r PartialErrReporter) *queryable {
-	q.partialErrReport = r
-	return q
-}
-
-func (q *queryable) WithDeduplication() *queryable {
-	q.deduplicate = true
-	return q
-}
-
 // Querier returns a new storage querier against the underlying proxy store API.
 func (q *queryable) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
-	return newQuerier(ctx, q.base.logger, mint, maxt, q.base.replicaLabel, q.base.proxy, q.deduplicate, q.partialErrReport), nil
+	return newQuerier(ctx, q.logger, mint, maxt, q.replicaLabel, q.proxy, q.deduplicate, q.partialErrReport), nil
 }
 
 type querier struct {

@@ -125,7 +125,7 @@ func runQuery(
 	var (
 		stores           = newStoreSet(logger, reg, tracer, peer, storeAddrs)
 		proxy            = store.NewProxyStore(logger, stores.Get, selectorLset)
-		queryableBuilder = query.NewQueryableBuilder(logger, proxy, replicaLabel)
+		queryableCreator = query.NewQueryableCreator(logger, proxy, replicaLabel)
 		engine           = promql.NewEngine(
 			logger,
 			reg,
@@ -163,7 +163,7 @@ func runQuery(
 		router := route.New()
 		ui.New(logger, nil).Register(router)
 
-		api := v1.NewAPI(reg, engine, queryableBuilder)
+		api := v1.NewAPI(reg, engine, queryableCreator)
 		api.Register(router.WithPrefix("/api/v1"), tracer, logger)
 
 		mux := http.NewServeMux()
